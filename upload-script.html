@@ -1,0 +1,79 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Upload script (complete, working)</title><style>body{font-family:system-ui,sans-serif;max-width:1200px;margin:20px auto;padding:0 16px;color:#222;background:#fff}</style></head><body><h1 style="font-size:18px">Upload script (complete, working)</h1><p style="font-size:13px">youtube.py – the complete module used by Uyku Kanali Otomasyon to authorize with Google OAuth and upload videos via the YouTube Data API v3.</p><pre style="font:11px/1.35 ui-monospace,Menlo,monospace;background:#f4f5f7;padding:12px;border-radius:6px;white-space:pre-wrap">&quot;&quot;&quot;YouTube bağlantısı: bir kez yetkilendirme ve video yükleme.&quot;&quot;&quot;
+import os, sys, json, time
+from pathlib import Path
+
+KOK = Path(__file__).resolve().parent
+SCOPES = [&quot;https://www.googleapis.com/auth/youtube.upload&quot;, &quot;https://www.googleapis.com/auth/youtube.readonly&quot;,
+          &quot;https://www.googleapis.com/auth/youtube.force-ssl&quot;]
+TOKEN = KOK / &quot;token.json&quot;; SECRET = KOK / &quot;client_secret.json&quot;
+
+
+def creds():
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    if not TOKEN.exists(): raise RuntimeError(&quot;YouTube bağlı değil: önce &#x27;YouTube&#x27;a bağlan.command&#x27; dosyasını çalıştır.&quot;)
+    c = Credentials.from_authorized_user_file(str(TOKEN), SCOPES)
+    if not c.valid:
+        c.refresh(Request()); TOKEN.write_text(c.to_json())
+    return c
+
+
+def service():
+    from googleapiclient.discovery import build
+    return build(&quot;youtube&quot;, &quot;v3&quot;, credentials=creds(), cache_discovery=False)
+
+
+def authorize():
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    if not SECRET.exists():
+        adaylar = sorted((Path.home() / &quot;Downloads&quot;).glob(&quot;client_secret*.json&quot;), key=lambda p: p.stat().st_mtime)
+        if adaylar:
+            import shutil; shutil.copy(adaylar[-1], SECRET); print(&quot;İndirilenler&#x27;deki&quot;, adaylar[-1].name, &quot;kullanıldı.&quot;)
+    if not SECRET.exists():
+        print(f&quot;client_secret.json bulunamadı. Google Cloud&#x27;dan indirdiğin dosyayı şu klasöre koy:\n{KOK}&quot;); sys.exit(1)
+    flow = InstalledAppFlow.from_client_secrets_file(str(SECRET), SCOPES)
+    c = flow.run_local_server(port=0, prompt=&quot;consent&quot;, access_type=&quot;offline&quot;)
+    TOKEN.write_text(c.to_json())
+    ch = service().channels().list(part=&quot;snippet&quot;, mine=True).execute().get(&quot;items&quot;, [])
+    print(&quot;Bağlandı. Kanal:&quot;, ch[0][&quot;snippet&quot;][&quot;title&quot;] if ch else &quot;(kanal bulunamadı)&quot;)
+
+
+def upload(video, thumb, meta, privacy=&quot;public&quot;, category=&quot;10&quot;, publish_at=None, log=print):
+    from googleapiclient.http import MediaFileUpload
+    from googleapiclient.errors import HttpError
+    yt = service()
+    status = {&quot;privacyStatus&quot;: privacy, &quot;selfDeclaredMadeForKids&quot;: False, &quot;containsSyntheticMedia&quot;: False}
+    if publish_at: status.update(privacyStatus=&quot;private&quot;, publishAt=publish_at)
+    body = {&quot;snippet&quot;: {&quot;title&quot;: meta[&quot;title&quot;], &quot;description&quot;: meta[&quot;description&quot;], &quot;tags&quot;: meta[&quot;tags&quot;], &quot;categoryId&quot;: category,
+                        &quot;defaultLanguage&quot;: &quot;en&quot;, &quot;defaultAudioLanguage&quot;: &quot;zxx&quot;}, &quot;status&quot;: status}
+    media = MediaFileUpload(str(video), chunksize=64 * 1024 * 1024, resumable=True, mimetype=&quot;video/mp4&quot;)
+    req = yt.videos().insert(part=&quot;snippet,status&quot;, body=body, media_body=media)
+    resp = None; tries = 0
+    while resp is None:
+        try:
+            st, resp = req.next_chunk()
+            if st: log(f&quot;yükleniyor %{int(st.progress()*100)}&quot;)
+        except HttpError as e:
+            if e.resp.status in (500, 502, 503, 504) and tries &lt; 8:
+                tries += 1; time.sleep(2 ** tries); continue
+            raise
+        except (ConnectionError, TimeoutError, OSError):
+            if tries &lt; 8: tries += 1; time.sleep(2 ** tries); continue
+            raise
+    vid = resp[&quot;id&quot;]; log(f&quot;yüklendi: https://youtu.be/{vid}&quot;)
+    try:
+        yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(thumb), mimetype=&quot;image/jpeg&quot;)).execute()
+        log(&quot;thumbnail eklendi&quot;)
+    except HttpError as e:
+        log(f&quot;thumbnail eklenemedi (kanalın telefonla doğrulanması gerekebilir): {e}&quot;)
+    try:
+        real = yt.videos().list(part=&quot;status&quot;, id=vid).execute()[&quot;items&quot;][0][&quot;status&quot;][&quot;privacyStatus&quot;]
+        if real != status[&quot;privacyStatus&quot;]:
+            log(f&quot;UYARI: video &#x27;{real}&#x27; durumunda kaldı. Google Cloud projesi YouTube denetiminden geçene kadar API ile yüklenen videolar gizli kalır.&quot;)
+    except Exception: pass
+    return vid
+
+
+if __name__ == &quot;__main__&quot; and len(sys.argv) &gt; 1 and sys.argv[1] == &quot;yetkilendir&quot;:
+    authorize()
+</pre></body></html>
